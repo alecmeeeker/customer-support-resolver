@@ -482,7 +482,7 @@ Return JSON only:
                             VALUES (%s, %s, %s)
                             ON CONFLICT DO NOTHING
                         """, (new_issue_id, similar_id, similarity_score))
-                    except:
+                    except Exception:
                         pass
                 self.db_conn.commit()
             

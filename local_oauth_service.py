@@ -109,7 +109,7 @@ class LocalOAuth2Service:
             try:
                 webbrowser.open(auth_url)
                 print("Browser opened successfully.")
-            except:
+            except Exception:
                 print(f"\n❌ Couldn't open browser automatically.")
                 print(f"Please visit this URL manually:\n\n{auth_url}\n")
             
@@ -299,7 +299,10 @@ class LocalOAuth2Service:
         if not creds:
             raise Exception("No credentials found. Please authenticate first.")
         
-        if creds.expired or (creds.expiry and creds.expiry <= datetime.now(timezone.utc) + timedelta(minutes=buffer_minutes)):
+        expiry = creds.expiry
+        if expiry and expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        if creds.expired or (expiry and expiry <= datetime.now(timezone.utc) + timedelta(minutes=buffer_minutes)):
             logger.info("Token expired or expiring soon, refreshing...")
             creds.refresh(Request())
             self.save_credentials(creds)

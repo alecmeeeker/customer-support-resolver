@@ -275,7 +275,10 @@ class CompleteProcessor:
                 chunked = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM classified_emails")
                 total = cur.fetchone()[0]
-                print(f"  Progress: {chunked:,}/{total:,} ({chunked/total*100:.1f}%)")
+                if total > 0:
+                    print(f"  Progress: {chunked:,}/{total:,} ({chunked/total*100:.1f}%)")
+                else:
+                    print(f"  Progress: no emails in database")
         
         print(f"\nCompleted in {(time.time() - start_time)/60:.1f} minutes")
         print(f"Processed: {total_short} short + {total_regular} regular = {total_short + total_regular} total")

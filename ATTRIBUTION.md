@@ -1,13 +1,13 @@
 # Attribution Guidelines
 
-This document provides examples of how to properly attribute Alec Meeker and Applequist Inc. when using the Email Pipeline software commercially.
+This document provides examples of how to properly attribute Alec Meeker and Applequist Inc. when using the Customer Support Resolver software commercially.
 
 ## Web Applications
 
 ### HTML Footer Example
 ```html
 <footer>
-  <p>Powered by <a href="https://applequist.com">Email Pipeline by Alec Meeker and Applequist Inc.</a></p>
+  <p>Powered by <a href="https://applequist.com">Customer Support Resolver by Alec Meeker and Applequist Inc.</a></p>
 </footer>
 ```
 
@@ -31,13 +31,13 @@ This document provides examples of how to properly attribute Alec Meeker and App
 
 ### API Response Header
 ```
-X-Powered-By: Email Pipeline by Alec Meeker and Applequist Inc.
+X-Powered-By: Customer Support Resolver by Alec Meeker and Applequist Inc.
 ```
 
 ### API Documentation
 Include in your API documentation:
 ```
-This API is powered by Email Pipeline by Alec Meeker and Applequist Inc.
+This API is powered by Customer Support Resolver by Alec Meeker and Applequist Inc.
 ```
 
 ## Desktop Applications
@@ -45,7 +45,7 @@ This API is powered by Email Pipeline by Alec Meeker and Applequist Inc.
 ### About Dialog
 ```
 Email Processing System v1.0
-Powered by Email Pipeline by Alec Meeker and Applequist Inc.
+Powered by Customer Support Resolver by Alec Meeker and Applequist Inc.
 https://applequist.com
 ```
 
@@ -54,7 +54,7 @@ https://applequist.com
 ### Splash Screen or About Section
 Display during app launch or in settings/about:
 ```
-Powered by Email Pipeline
+Powered by Customer Support Resolver
 by Alec Meeker and Applequist Inc.
 ```
 
@@ -64,7 +64,7 @@ by Alec Meeker and Applequist Inc.
 ```
 ===================================================
 Email Processor v1.0
-Powered by Email Pipeline by Alec Meeker and Applequist Inc.
+Powered by Customer Support Resolver by Alec Meeker and Applequist Inc.
 ===================================================
 ```
 
@@ -72,8 +72,8 @@ Powered by Email Pipeline by Alec Meeker and Applequist Inc.
 
 The following variations are acceptable for space-constrained interfaces:
 
-1. "Powered by Applequist Email Pipeline"
-2. "Email Pipeline © Applequist Inc."
+1. "Powered by Applequist Customer Support Resolver"
+2. "Customer Support Resolver © Applequist Inc."
 3. "Powered by Applequist Inc."
 
 ## Not Acceptable

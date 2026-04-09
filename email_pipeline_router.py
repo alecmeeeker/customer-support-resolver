@@ -108,6 +108,8 @@ class EmailPipelineRouter:
                 updated_at TIMESTAMP DEFAULT NOW()
             );
             
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_routes_email_type
+                ON email_pipeline_routes(email_id, pipeline_type);
             CREATE INDEX IF NOT EXISTS idx_pipeline_routes_email ON email_pipeline_routes(email_id);
             CREATE INDEX IF NOT EXISTS idx_pipeline_routes_type ON email_pipeline_routes(pipeline_type);
             CREATE INDEX IF NOT EXISTS idx_pipeline_routes_status ON email_pipeline_routes(status);

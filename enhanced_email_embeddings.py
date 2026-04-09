@@ -25,6 +25,9 @@ from email_pipeline_router import DateTimeJSONEncoder
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Delegate email for identifying "our" messages in thread context
+DELEGATE_EMAIL = os.getenv('DELEGATE_EMAIL', '')
+
 # Note: Service account authentication removed in favor of OAuth2
 # Gmail API access is optional and only needed for thread context features
 # Thread context is disabled by default for performance
@@ -191,12 +194,12 @@ class EnhancedEmailEmbeddings:
             CREATE INDEX IF NOT EXISTS idx_thread_context_gmail_id ON thread_context(gmail_thread_id);
             CREATE INDEX IF NOT EXISTS idx_thread_context_pipeline ON thread_context(primary_pipeline);
         """)
-        
+
         # Pipeline context enrichment
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS pipeline_context_enrichment (
                 id SERIAL PRIMARY KEY,
-                email_id INTEGER REFERENCES classified_emails(id),
+                email_id INTEGER UNIQUE REFERENCES classified_emails(id),
                 pipeline_type VARCHAR(50),
                 
                 -- Related articles (for story context)
@@ -490,7 +493,7 @@ class EnhancedEmailEmbeddings:
             date_str = headers.get('Date', '')
             try:
                 date_sent = parsedate_to_datetime(date_str)
-            except:
+            except Exception:
                 date_sent = datetime.now(timezone.utc)
             
             return {

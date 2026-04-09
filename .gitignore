@@ -29,6 +29,7 @@ venv/
 ENV/
 env/
 .venv/
+oauth_test_env/
 .env
 
 # IDE

@@ -6,17 +6,11 @@ Uses existing service account credentials for Gmail extraction with full dedupli
 
 import os
 
-# Debug environment variables
-print(f"DEBUG: Script starting - HF_HUB_OFFLINE = {os.environ.get('HF_HUB_OFFLINE', 'NOT SET')}")
-print(f"DEBUG: Script starting - TRANSFORMERS_OFFLINE = {os.environ.get('TRANSFORMERS_OFFLINE', 'NOT SET')}")
-
-# Force set if they exist
+# Configure offline mode for HuggingFace if requested
 if os.environ.get('HF_HUB_OFFLINE') == '1':
-    os.environ['HF_HUB_OFFLINE'] = '1'
     os.environ['TRANSFORMERS_OFFLINE'] = '1'
     os.environ['HF_DATASETS_OFFLINE'] = '1'
     os.environ['SENTENCE_TRANSFORMERS_HOME'] = os.path.expanduser('~/.cache/torch/sentence_transformers')
-    print("DEBUG: Forced offline mode environment variables")
 import json
 import base64
 from datetime import datetime, timezone
@@ -560,7 +554,7 @@ class GmailServiceAccountExtractor:
             # Parse date
             try:
                 date_sent = parsedate_to_datetime(date_header) if date_header else datetime.now(timezone.utc)
-            except:
+            except Exception:
                 date_sent = datetime.now(timezone.utc)
             
             # Extract body

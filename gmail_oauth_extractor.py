@@ -209,7 +209,7 @@ class GmailOAuthExtractor:
                     # Ensure timezone awareness
                     if received_date.tzinfo is None:
                         received_date = received_date.replace(tzinfo=timezone.utc)
-                except:
+                except Exception:
                     logger.warning(f"Failed to parse date: {date_str}")
             
             # Extract body
@@ -265,12 +265,13 @@ class GmailOAuthExtractor:
         
         return body.strip()
     
-    def save_to_database(self, emails: List[Dict]) -> int:
-        """Save emails to database with deduplication"""
+    def save_to_database(self, emails: List[Dict]) -> tuple:
+        """Save emails to database with deduplication. Returns (count, gmail_ids)."""
         if not emails:
-            return 0
-        
+            return 0, []
+
         saved_count = 0
+        saved_gmail_ids = []
         
         try:
             with self.get_db_connection() as conn:
@@ -298,6 +299,8 @@ class GmailOAuthExtractor:
                                         cc_emails.append(cc_email)
 
                             # Insert email into classified_emails table
+                            # Use savepoint so a single failure doesn't roll back the batch
+                            cursor.execute("SAVEPOINT email_save")
                             cursor.execute("""
                                 INSERT INTO classified_emails (
                                     gmail_id, thread_id, message_id, in_reply_to,
@@ -323,20 +326,22 @@ class GmailOAuthExtractor:
                                 email['labels'],
                                 False  # Initially not processed
                             ))
-                            
+                            cursor.execute("RELEASE SAVEPOINT email_save")
+
                             saved_count += 1
-                            
+                            saved_gmail_ids.append(email['gmail_id'])
+
                         except Exception as e:
                             logger.error(f"Error saving email {email['gmail_id']}: {e}")
-                            conn.rollback()
+                            cursor.execute("ROLLBACK TO SAVEPOINT email_save")
                             continue
-                    
+
                     conn.commit()
                     
         except Exception as e:
             logger.error(f"Database error: {e}")
         
-        return saved_count
+        return saved_count, saved_gmail_ids
     
     def mark_as_processed(self, gmail_ids: List[str]):
         """Mark emails as processed by removing unread label"""
@@ -394,13 +399,12 @@ async def main():
     
     if emails:
         # Save to database
-        saved_count = extractor.save_to_database(emails)
+        saved_count, saved_gmail_ids = extractor.save_to_database(emails)
         print(f"\n✓ Saved {saved_count} new emails to database")
-        
+
         # Mark as processed
-        if saved_count > 0:
-            gmail_ids = [e['gmail_id'] for e in emails[:saved_count]]
-            extractor.mark_as_processed(gmail_ids)
+        if saved_gmail_ids:
+            extractor.mark_as_processed(saved_gmail_ids)
     else:
         print("No unread emails found")
 

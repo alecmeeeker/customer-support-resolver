@@ -41,7 +41,7 @@ def check_system_requirements():
     try:
         requests.get('https://www.google.com', timeout=5)
         print("✓ Internet connectivity working")
-    except:
+    except Exception:
         issues.append("No internet connectivity or Google is blocked")
     
     return issues
@@ -334,7 +334,7 @@ def check_browser_capability():
                 )
                 if result.returncode == 0:
                     browsers.append(browser)
-            except:
+            except Exception:
                 pass
         
         if browsers:
