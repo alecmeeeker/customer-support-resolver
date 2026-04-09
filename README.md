@@ -56,33 +56,35 @@ customer_issue_dashboard.py ──> Flask dashboard (localhost:5000)
 ## Tech Stack
 
 - **Python 3.8+**
-- **PostgreSQL 17** with **pgvector** (HNSW indexes, cosine similarity)
+- **SQLite** (embedded relational database, zero-config)
+- **LanceDB** (embedded vector database for similarity search)
 - **sentence-transformers** (`all-MiniLM-L6-v2`, 384 dimensions)
 - **Google Gemini API** for classification and resolution synthesis
 - **Gmail API** via OAuth2 (with legacy service account support)
 - **Flask** for the dashboard
 - **cryptography** (Fernet) for secure token storage
 
-## Database Schema
+## Database
 
-14 PostgreSQL tables across three domains:
+**SQLite** (`data/limrose.db`) — 16 tables for relational data across three domains:
 
-**Email Storage** — `classified_emails`, `email_chunks`, `email_fingerprints_v2`, `parsed_emails`
+**Email Storage** — `classified_emails`, `email_fingerprints_v2`, `email_duplicate_groups`, `parsed_emails`
 
-**Classification & Routing** — `email_classifications`, `email_pipeline_routes`, `pipeline_outcomes`, `pipeline_context_enrichment`
+**Classification & Routing** — `email_classifications`, `email_pipeline_routes`, `pipeline_outcomes`, `pipeline_context_enrichment`, `classification_performance`
 
-**Issue Resolution** — `customer_issues`, `issue_resolutions`, `issue_similarity_cache`, `sender_interaction_history`, `thread_context`
+**Issue Resolution** — `customer_issues`, `customer_issues_v2`, `resolution_feedback`, `issue_similarity_cache`, `sender_interaction_history`, `thread_context`
 
-Vector indexes use HNSW with cosine distance for sub-linear similarity search over the embedding space.
+**LanceDB** (`data/vectors/`) — 3 tables for vector embeddings: `email_chunk_vectors`, `enhanced_embedding_vectors`, `issue_embedding_vectors`. Cosine similarity search for semantic matching.
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.8+
-- PostgreSQL 17 with pgvector extension
 - Gmail account with Google Cloud project (Gmail API enabled)
 - Gemini API key ([get one here](https://makersuite.google.com/app/apikey))
+
+No database installation required — SQLite and LanceDB are embedded and set up automatically.
 
 ### Install
 

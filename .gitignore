@@ -1,3 +1,6 @@
+# Database
+data/
+
 # Python
 __pycache__/
 *.py[cod]

@@ -35,7 +35,7 @@ if [[ "$1" == "--setup" ]]; then
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}Email Pipeline Initial Setup${NC}"
     echo -e "${GREEN}========================================${NC}\n"
-    
+
     # Check Python
     echo -e "${YELLOW}Checking Python installation...${NC}"
     if ! command -v python3 &> /dev/null; then
@@ -44,44 +44,22 @@ if [[ "$1" == "--setup" ]]; then
         exit 1
     fi
     python3 --version
-    
+
     # Create virtual environment
     if [ ! -d "venv" ]; then
         echo -e "\n${YELLOW}Creating virtual environment...${NC}"
         python3 -m venv venv
     fi
-    
+
     # Activate virtual environment
     echo -e "${YELLOW}Activating virtual environment...${NC}"
     source venv/bin/activate
-    
+
     # Install dependencies
     echo -e "\n${YELLOW}Installing Python dependencies...${NC}"
     pip install --upgrade pip
     pip install -r requirements.txt
-    
-    # Check PostgreSQL
-    echo -e "\n${YELLOW}Checking PostgreSQL...${NC}"
-    if ! command -v psql &> /dev/null; then
-        echo -e "${RED}Error: PostgreSQL is not installed${NC}"
-        echo "Please install PostgreSQL 17 with pgvector extension"
-        echo "On macOS: brew install postgresql@17 pgvector"
-        echo "On Ubuntu: apt-get install postgresql-17 postgresql-17-pgvector"
-        exit 1
-    fi
-    psql --version
-    
-    # Check Redis
-    echo -e "\n${YELLOW}Checking Redis...${NC}"
-    if ! command -v redis-cli &> /dev/null; then
-        echo -e "${YELLOW}Warning: Redis is not installed${NC}"
-        echo "Redis is optional but recommended for background tasks"
-        echo "On macOS: brew install redis"
-        echo "On Ubuntu: apt-get install redis-server"
-    else
-        redis-cli --version
-    fi
-    
+
     # Create .env file if it doesn't exist
     if [ ! -f ".env" ]; then
         echo -e "\n${YELLOW}Creating .env file from template...${NC}"
@@ -89,46 +67,13 @@ if [[ "$1" == "--setup" ]]; then
         echo -e "${GREEN}Created .env file. Please edit it with your configuration:${NC}"
         echo "  - Gmail authentication: Run 'python setup_oauth.py' to configure"
         echo "  - LLM_API_KEY: Your Gemini API key"
-        echo "  - DB_NAME, DB_USER: Database configuration"
     fi
-    
-    # Load environment variables
-    if [ -f ".env" ]; then
-        export $(grep -v '^#' .env | xargs)
-    fi
-    
-    # Create database
-    echo -e "\n${YELLOW}Setting up PostgreSQL database...${NC}"
-    DB_NAME=${DB_NAME:-limrose_email_pipeline}
-    DB_USER=${DB_USER:-postgres}
-    
-    # Check if database exists
-    if psql -U $DB_USER -lqt | cut -d \| -f 1 | grep -qw $DB_NAME; then
-        echo "Database '$DB_NAME' already exists"
-    else
-        echo "Creating database '$DB_NAME'..."
-        createdb -U $DB_USER $DB_NAME
-        if [ $? -ne 0 ]; then
-            echo -e "${RED}Error: Failed to create database${NC}"
-            echo "You may need to run: sudo -u postgres createdb $DB_NAME"
-            exit 1
-        fi
-    fi
-    
-    # Create pgvector extension
-    echo "Creating pgvector extension..."
-    psql -U $DB_USER -d $DB_NAME -c "CREATE EXTENSION IF NOT EXISTS vector;"
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}Error: Failed to create pgvector extension${NC}"
-        echo "Make sure pgvector is installed"
-        exit 1
-    fi
-    
-    # Create initial tables
-    echo -e "\n${YELLOW}Creating database tables...${NC}"
+
+    # Create database tables (SQLite + LanceDB - no server needed)
+    echo -e "\n${YELLOW}Setting up database...${NC}"
     python scripts/setup_all_tables.py
-    
-    # Download models
+
+    # Download ML models
     echo -e "\n${YELLOW}Downloading ML models (this may take a few minutes)...${NC}"
     python -c "
 from sentence_transformers import SentenceTransformer
@@ -136,7 +81,7 @@ print('Downloading sentence transformer model...')
 model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 print('Model downloaded successfully!')
 "
-    
+
     # Check OAuth configuration
     echo -e "\n${YELLOW}Checking Gmail OAuth configuration...${NC}"
     oauth_config="$HOME/.email-pipeline/config/oauth_config.json"
@@ -151,13 +96,13 @@ print('Model downloaded successfully!')
     else
         echo -e "${GREEN}OAuth configuration found${NC}"
     fi
-    
+
     # Final instructions
     echo -e "\n${GREEN}========================================${NC}"
     echo -e "${GREEN}Setup Complete!${NC}"
     echo -e "${GREEN}========================================${NC}\n"
     echo -e "${YELLOW}Next steps:${NC}"
-    echo "1. Edit .env file with your LLM and database configuration"
+    echo "1. Edit .env file with your Gemini API key"
     echo "2. Run the pipeline: ./update_emails_v2.sh"
     echo ""
     echo -e "${BLUE}For more help, see README.md${NC}"
@@ -204,25 +149,21 @@ check_environment() {
     echo -e "${GREEN}Configuration OK${NC}"
 }
 
-# Ensure services are running
-check_services() {
-    # Check PostgreSQL (use version-independent path)
-    PSQL=$(which psql 2>/dev/null || echo "/usr/local/opt/postgresql@17/bin/psql")
-    DB_NAME=${DB_NAME:-limrose_email_pipeline}
-    if ! $PSQL -d $DB_NAME -c "SELECT 1" > /dev/null 2>&1; then
-        echo -e "${RED}Error: PostgreSQL is not running or database '$DB_NAME' not accessible${NC}"
-        echo "Please ensure PostgreSQL is running and database exists"
-        echo "Run './update_emails_v2.sh --setup' if you haven't set up the database"
+# Ensure database exists
+check_database() {
+    if [ ! -f "data/limrose.db" ]; then
+        echo -e "${RED}Error: Database not found at data/limrose.db${NC}"
+        echo "Run './update_emails_v2.sh --setup' to create the database"
         exit 1
     fi
-    echo -e "${GREEN}PostgreSQL connection verified${NC}"
+    echo -e "${GREEN}Database found${NC}"
 }
 
 # Check environment before starting
 check_environment
 
-# Check services before starting
-check_services
+# Check database before starting
+check_database
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Email Update Pipeline V2${NC}"
@@ -272,19 +213,14 @@ echo "Checking for emails classified as customer issues..."
 
 # Check if there are any customer issue emails
 CUSTOMER_ISSUES=$(python -c "
-import psycopg2
-import os
-conn = psycopg2.connect(
-    dbname=os.getenv('DB_NAME', 'limrose_email_pipeline'),
-    user=os.getenv('DB_USER', 'postgres'),
-    host=os.getenv('DB_HOST', 'localhost')
-)
+from config.database import get_connection
+conn = get_connection()
 cur = conn.cursor()
 cur.execute('''
     SELECT COUNT(DISTINCT ce.id)
     FROM classified_emails ce
     JOIN email_pipeline_routes epr ON ce.id = epr.email_id
-    WHERE epr.pipeline_type IN ('customer_issue', 'customer_complaint', 'customer_service_or_feedback')
+    WHERE epr.pipeline_type IN (\"customer_issue\", \"customer_complaint\", \"customer_service_or_feedback\")
 ''')
 count = cur.fetchone()[0]
 print(count)
@@ -316,31 +252,21 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "\n${YELLOW}Pipeline Summary:${NC}"
 python -c "
 import sys
-import os
 try:
-    import psycopg2
-    from datetime import datetime, timedelta
-    
-    # Connect to database
-    conn = psycopg2.connect(
-        dbname=os.getenv('DB_NAME', 'limrose_email_pipeline'),
-        user=os.getenv('DB_USER', 'postgres'),
-        host=os.getenv('DB_HOST', 'localhost')
-    )
+    from config.database import get_connection
+
+    conn = get_connection()
     cur = conn.cursor()
 
-    # Total emails
     cur.execute('SELECT COUNT(*) FROM classified_emails')
     total_emails = cur.fetchone()[0]
 
-    # Recent emails (last 24 hours)
     cur.execute('''
-        SELECT COUNT(*) FROM classified_emails 
-        WHERE created_at >= NOW() - INTERVAL '24 hours'
+        SELECT COUNT(*) FROM classified_emails
+        WHERE created_at >= datetime(\"now\", \"-24 hours\")
     ''')
     recent_emails = cur.fetchone()[0]
 
-    # Email classifications
     cur.execute('''
         SELECT pipeline_type, COUNT(DISTINCT email_id) as count
         FROM email_pipeline_routes
@@ -350,99 +276,57 @@ try:
     ''')
     classifications = cur.fetchall()
 
-    # Emails with chunks and embeddings
-    cur.execute('SELECT COUNT(DISTINCT email_id) FROM email_chunks')
+    cur.execute('SELECT COUNT(*) FROM classified_emails WHERE chunks_created = 1')
     emails_with_chunks = cur.fetchone()[0]
-    
-    # Enhanced embeddings
+
     cur.execute('SELECT COUNT(DISTINCT email_id) FROM enhanced_email_embeddings')
     emails_with_enhanced = cur.fetchone()[0]
 
-    # Duplicate groups
     cur.execute('SELECT COUNT(*) FROM email_duplicate_groups WHERE member_count > 1')
     duplicate_groups = cur.fetchone()[0]
-    
-    # Sender stats
+
     cur.execute('SELECT COUNT(DISTINCT sender_email) FROM sender_interaction_history')
     unique_senders = cur.fetchone()[0]
-    
-    # Customer issue stats
+
     cur.execute('''
-        SELECT 
+        SELECT
             COUNT(*) as total_issues,
             SUM(CASE WHEN has_resolution THEN 1 ELSE 0 END) as resolved
         FROM customer_issues_v2
     ''')
     issue_stats = cur.fetchone()
-    if issue_stats:
-        total_issues = issue_stats[0] or 0
-        resolved_issues = issue_stats[1] or 0
-    else:
-        total_issues = 0
-        resolved_issues = 0
+    total_issues = issue_stats[0] or 0
+    resolved_issues = issue_stats[1] or 0
 
-    # Display statistics
     print(f'Total emails processed: {total_emails:,}')
     print(f'New emails (last 24h): {recent_emails:,}')
     print(f'Duplicate email groups: {duplicate_groups:,}')
-    
+
     if total_emails > 0:
         print(f'\\nEmbedding Coverage:')
         print(f'  Emails with chunks: {emails_with_chunks:,} ({emails_with_chunks/total_emails*100:.1f}%)')
         print(f'  Enhanced embeddings: {emails_with_enhanced:,} ({emails_with_enhanced/total_emails*100:.1f}%)')
-    
+
     print(f'\\nClassification Breakdown:')
     if classifications:
-        for pipeline_type, count in classifications[:5]:
-            print(f'  {pipeline_type}: {count:,}')
+        for row in list(classifications)[:5]:
+            print(f'  {row[0]}: {row[1]:,}')
         if len(classifications) > 5:
             print(f'  ... and {len(classifications)-5} more categories')
     else:
         print('  No classifications yet')
-    
+
     if unique_senders > 0:
         print(f'\\nSender Intelligence:')
         print(f'  Unique senders tracked: {unique_senders:,}')
-        
-        # Top senders
-        cur.execute('''
-            SELECT sender_email, total_emails_sent 
-            FROM sender_interaction_history 
-            ORDER BY total_emails_sent DESC 
-            LIMIT 3
-        ''')
-        top_senders = cur.fetchall()
-        if top_senders:
-            print(f'  Top senders:')
-            for email, count in top_senders:
-                print(f'    {email}: {count} emails')
-    
+
     if total_issues > 0:
         print(f'\\nCustomer Issues:')
         print(f'  Total issues tracked: {total_issues:,}')
         print(f'  Issues resolved: {resolved_issues:,} ({resolved_issues/total_issues*100:.1f}%)')
-        
-        # Top issue types
-        cur.execute('''
-            SELECT issue_type, COUNT(*) as count
-            FROM customer_issues_v2
-            GROUP BY issue_type
-            ORDER BY count DESC
-            LIMIT 3
-        ''')
-        top_issues = cur.fetchall()
-        if top_issues:
-            print(f'  Top issue types:')
-            for issue_type, count in top_issues:
-                print(f'    {issue_type}: {count}')
-    
+
     conn.close()
-    
-except psycopg2.OperationalError as e:
-    print('ERROR: Could not connect to database')
-    print('Please ensure PostgreSQL is running and accessible')
-    sys.exit(1)
-    
+
 except Exception as e:
     print(f'ERROR: {e}')
     import traceback

@@ -4,22 +4,17 @@ Optimized Batch LLM Email Classifier
 This version avoids subprocess overhead by directly integrating the embedding system.
 """
 
-import psycopg2
-import psycopg2.extras
+import sqlite3
 import requests
 import json
 import os
 import sys
 import time
 from typing import List, Dict, Any, Optional
+from config.database import get_connection
 
 # Import the enhanced email embeddings directly
 from enhanced_email_embeddings import EnhancedEmailEmbeddings
-
-# --- Configuration ---
-DB_NAME = os.getenv("DB_NAME", "limrose_email_pipeline")
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_HOST = os.getenv("DB_HOST", "localhost")
 
 # Choose your LLM provider and set the API key
 # Options: "GEMINI" or "DEEPSEEK"
@@ -152,13 +147,11 @@ class OptimizedLLMBatchClassifier:
     def __init__(self):
         """Initializes the database connection and embedding system."""
         try:
-            self.conn = psycopg2.connect(
-                dbname=DB_NAME, user=DB_USER, host=DB_HOST
-            )
-            self.cursor = self.conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-            print("✅ Database connection established.")
-        except psycopg2.OperationalError as e:
-            print(f"❌ CRITICAL: Could not connect to database '{DB_NAME}'. Please check connection settings.", file=sys.stderr)
+            self.conn = get_connection()
+            self.cursor = self.conn.cursor()
+            print("Database connection established.")
+        except sqlite3.OperationalError as e:
+            print(f"CRITICAL: Could not connect to database. Please run setup_all_tables.py first.", file=sys.stderr)
             raise e
         
         # Initialize the embedding system once
@@ -214,7 +207,7 @@ class OptimizedLLMBatchClassifier:
         # This rule is based on previous manual spam classifications.
         self.cursor.execute("""
             SELECT 1 FROM email_pipeline_routes
-            WHERE email_id = %s AND pipeline_type = 'spam'
+            WHERE email_id = ? AND pipeline_type = 'spam'
             LIMIT 1
         """, (email['id'],))
         if self.cursor.fetchone():
@@ -264,8 +257,8 @@ class OptimizedLLMBatchClassifier:
         print(f"🔍 Fetching {batch_size} recent emails for classification...")
         
         # This query finds emails that do not have any of our new pipeline routes.
-        # This is the safest way to find "unprocessed" emails for this script.
-        query = """
+        placeholders = ','.join('?' * len(CLASSIFICATION_LABELS))
+        query = f"""
             SELECT
                 ce.id,
                 ce.subject,
@@ -279,13 +272,13 @@ class OptimizedLLMBatchClassifier:
             WHERE NOT EXISTS (
                 SELECT 1
                 FROM email_pipeline_routes epr
-                WHERE epr.email_id = ce.id AND epr.pipeline_type IN %s
+                WHERE epr.email_id = ce.id AND epr.pipeline_type IN ({placeholders})
             )
             ORDER BY
                 ce.id DESC
-            LIMIT %s;
+            LIMIT ?;
         """
-        self.cursor.execute(query, (tuple(CLASSIFICATION_LABELS), batch_size))
+        self.cursor.execute(query, (*CLASSIFICATION_LABELS, batch_size))
         emails = self.cursor.fetchall()
         print(f"  Found {len(emails)} emails to process.")
         return [dict(row) for row in emails]
@@ -460,13 +453,11 @@ Return JSON only: {{"classifications": ["label1", "label2", ...]}}"""
         # No need to handle 'unclassified' anymore - LLM always returns valid classifications
 
         insert_query = """
-            INSERT INTO email_pipeline_routes (email_id, pipeline_type, status, priority_score)
-            VALUES %s
-            ON CONFLICT (email_id, pipeline_type) DO NOTHING;
+            INSERT OR IGNORE INTO email_pipeline_routes (email_id, pipeline_type, status, priority_score)
+            VALUES (?, ?, ?, ?)
         """
-        # Create a list of tuples for the executemany call
         values = [(email_id, c, 'pending', 0.8) for c in classifications]
-        psycopg2.extras.execute_values(self.cursor, insert_query, values)
+        self.cursor.executemany(insert_query, values)
         print(f"    -> Stored {len(values)} routes.")
 
     def run(self, batch_size: int = 10, dry_run: bool = False, process_all: bool = False):
@@ -483,13 +474,14 @@ Return JSON only: {{"classifications": ["label1", "label2", ...]}}"""
             return
 
         # Get total count of unclassified emails
-        self.cursor.execute("""
+        placeholders = ','.join('?' * len(CLASSIFICATION_LABELS))
+        self.cursor.execute(f"""
             SELECT COUNT(*) FROM classified_emails ce
             WHERE NOT EXISTS (
                 SELECT 1 FROM email_pipeline_routes epr
-                WHERE epr.email_id = ce.id AND epr.pipeline_type = ANY(%s)
+                WHERE epr.email_id = ce.id AND epr.pipeline_type IN ({placeholders})
             )
-        """, (CLASSIFICATION_LABELS,))
+        """, CLASSIFICATION_LABELS)
         total_unclassified = self.cursor.fetchone()[0]
         
         if total_unclassified == 0:
@@ -554,8 +546,8 @@ Return JSON only: {{"classifications": ["label1", "label2", ...]}}"""
                         self.conn.commit()
                         # Verify the commit worked by checking embeddings
                         self.cursor.execute("""
-                            SELECT COUNT(*) FROM enhanced_email_embeddings 
-                            WHERE email_id = %s
+                            SELECT COUNT(*) FROM enhanced_email_embeddings
+                            WHERE email_id = ?
                         """, (email['id'],))
                         if self.cursor.fetchone()[0] == 0:
                             raise RuntimeError(f"Embedding for email {email['id']} not found after commit!")
@@ -579,10 +571,10 @@ Return JSON only: {{"classifications": ["label1", "label2", ...]}}"""
             
             # Verify embeddings were actually saved
             self.cursor.execute("""
-                SELECT COUNT(*) FROM enhanced_email_embeddings 
+                SELECT COUNT(*) FROM enhanced_email_embeddings
                 WHERE email_id IN (
-                    SELECT id FROM classified_emails 
-                    WHERE id >= %s AND id <= %s
+                    SELECT id FROM classified_emails
+                    WHERE id >= ? AND id <= ?
                 )
             """, (emails[-1]['id'], emails[0]['id']))
             saved_count = self.cursor.fetchone()[0]

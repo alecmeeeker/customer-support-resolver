@@ -5,19 +5,12 @@ A web interface to view customer issues with semantic similarity insights
 """
 
 import os
-import psycopg2
-import psycopg2.extras
+import sqlite3
+from config.database import get_connection
 from flask import Flask, render_template_string, jsonify
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
-
-# Database configuration
-DB_CONFIG = {
-    'dbname': os.getenv('DB_NAME', 'limrose_email_pipeline'),
-    'user': os.getenv('DB_USER', 'postgres'),
-    'host': os.getenv('DB_HOST', 'localhost')
-}
 
 # HTML template
 DASHBOARD_TEMPLATE = """
@@ -124,7 +117,7 @@ DASHBOARD_TEMPLATE = """
 <body>
     <div class="container">
         <h1>Customer Issue Dashboard</h1>
-        
+
         <div class="stats">
             <div class="stat-card">
                 <div class="stat-value">{{ stats.total_issues }}</div>
@@ -204,7 +197,7 @@ DASHBOARD_TEMPLATE = """
                 <tbody>
                     {% for issue in recent_issues %}
                     <tr>
-                        <td>{{ issue.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                        <td>{{ issue.created_at[:16] if issue.created_at else '' }}</td>
                         <td>{{ issue.issue_type }}</td>
                         <td>
                             {{ issue.issue_summary[:100] }}...
@@ -228,41 +221,38 @@ DASHBOARD_TEMPLATE = """
 
         <div class="footer">
             <p>Powered by <a href="https://applequist.com">Email Pipeline by Alec Meeker and Applequist Inc.</a></p>
-            <p>Last updated: {{ datetime.now().strftime('%Y-%m-%d %H:%M:%S') }}</p>
+            <p>Last updated: {{ now }}</p>
         </div>
     </div>
 </body>
 </html>
 """
 
-def get_db_connection():
-    """Create database connection"""
-    return psycopg2.connect(**DB_CONFIG)
 
 @app.route('/')
 def dashboard():
     """Main dashboard view"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    
+    conn = get_connection()
+    cur = conn.cursor()
+
     # Get overall statistics
     cur.execute("""
-        SELECT 
+        SELECT
             COUNT(*) as total_issues,
             SUM(CASE WHEN has_resolution THEN 1 ELSE 0 END) as resolved_issues,
             SUM(CASE WHEN confidence_level = 'high' THEN 1 ELSE 0 END) as high_confidence,
             COUNT(DISTINCT CASE WHEN fix_instructions IS NOT NULL THEN id END) as unique_fixes
         FROM customer_issues_v2
     """)
-    stats = cur.fetchone()
-    
+    stats_row = dict(cur.fetchone())
+
     resolution_rate = 0
-    if stats['total_issues'] > 0:
-        resolution_rate = (stats['resolved_issues'] / stats['total_issues']) * 100
-    
+    if stats_row['total_issues'] and stats_row['total_issues'] > 0:
+        resolution_rate = (stats_row['resolved_issues'] / stats_row['total_issues']) * 100
+
     # Get category breakdown
     cur.execute("""
-        SELECT 
+        SELECT
             issue_category,
             COUNT(*) as count,
             SUM(CASE WHEN has_resolution THEN 1 ELSE 0 END) as resolved_count,
@@ -271,11 +261,11 @@ def dashboard():
         GROUP BY issue_category
         ORDER BY count DESC
     """)
-    categories = cur.fetchall()
-    
+    categories = [dict(row) for row in cur.fetchall()]
+
     # Get top issue types
     cur.execute("""
-        SELECT 
+        SELECT
             issue_type,
             COUNT(*) as count,
             MAX(issue_summary) as example_summary
@@ -284,11 +274,11 @@ def dashboard():
         ORDER BY count DESC
         LIMIT 10
     """)
-    issue_types = cur.fetchall()
-    
+    issue_types = [dict(row) for row in cur.fetchall()]
+
     # Get recent issues
     cur.execute("""
-        SELECT 
+        SELECT
             issue_type,
             issue_category,
             issue_summary,
@@ -299,56 +289,59 @@ def dashboard():
         ORDER BY created_at DESC
         LIMIT 20
     """)
-    recent_issues = cur.fetchall()
-    
+    recent_issues = [dict(row) for row in cur.fetchall()]
+
     conn.close()
-    
+
     return render_template_string(
         DASHBOARD_TEMPLATE,
         stats={
-            'total_issues': stats['total_issues'],
-            'resolved_issues': stats['resolved_issues'],
+            'total_issues': stats_row['total_issues'] or 0,
+            'resolved_issues': stats_row['resolved_issues'] or 0,
             'resolution_rate': resolution_rate,
-            'unique_fixes': stats['unique_fixes']
+            'unique_fixes': stats_row['unique_fixes'] or 0
         },
         categories=categories,
         issue_types=issue_types,
         recent_issues=recent_issues,
-        datetime=datetime
+        now=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     )
+
 
 @app.route('/api/stats')
 def api_stats():
     """API endpoint for statistics"""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    
-    # Get time-based statistics
+    conn = get_connection()
+    cur = conn.cursor()
+
+    # Get time-based statistics (last 30 days)
     cur.execute("""
-        SELECT 
-            DATE(created_at) as date,
+        SELECT
+            date(created_at) as date,
             COUNT(*) as issues,
             SUM(CASE WHEN has_resolution THEN 1 ELSE 0 END) as resolved
         FROM customer_issues_v2
-        WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'
-        GROUP BY DATE(created_at)
+        WHERE created_at >= datetime('now', '-30 days')
+        GROUP BY date(created_at)
         ORDER BY date
     """)
-    
+
     daily_stats = []
     for row in cur.fetchall():
+        row_dict = dict(row)
         daily_stats.append({
-            'date': row['date'].isoformat(),
-            'issues': row['issues'],
-            'resolved': row['resolved']
+            'date': row_dict['date'],
+            'issues': row_dict['issues'],
+            'resolved': row_dict['resolved']
         })
-    
+
     conn.close()
-    
+
     return jsonify({
         'daily_stats': daily_stats,
         'generated_at': datetime.now().isoformat()
     })
+
 
 if __name__ == '__main__':
     print("Starting Customer Issue Dashboard...")

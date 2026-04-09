@@ -15,8 +15,8 @@ import json
 import base64
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
-import psycopg2
-# from sentence_transformers import SentenceTransformer  # REMOVED: Embeddings now handled by batch_process_all_emails.py
+import sqlite3
+from config.database import get_connection
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from email.utils import parseaddr, parsedate_to_datetime
@@ -42,14 +42,9 @@ class GmailServiceAccountExtractor:
     def __init__(self):
         # self.model = SentenceTransformer(EMBEDDING_MODEL_NAME)  # REMOVED: Model loading moved to batch_process_all_emails.py
         self.service = self.authenticate_service_account()
-        self.db_conn = psycopg2.connect(
-            dbname=os.getenv('DB_NAME', 'limrose_email_pipeline'),
-            user=os.getenv('DB_USER', 'postgres'),
-            host=os.getenv('DB_HOST', 'localhost')
-        )
+        self.db_conn = get_connection()
         self.router = EmailPipelineRouter()
         self.normalizer = EmailNormalizer()
-        self.setup_database()
     
     def authenticate_service_account(self):
         """Authenticate using service account with delegation"""
@@ -73,124 +68,6 @@ class GmailServiceAccountExtractor:
             print(f"❌ Authentication failed: {e}")
             print("Make sure service account file exists and has proper permissions")
             raise
-    
-    def setup_database(self):
-        """Set up database tables including deduplication tables"""
-        cursor = self.db_conn.cursor()
-        
-        # Main classified emails table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS classified_emails (
-                id SERIAL PRIMARY KEY,
-                gmail_id VARCHAR(255) UNIQUE NOT NULL,
-                thread_id VARCHAR(255),
-                subject TEXT,
-                sender_email VARCHAR(255),
-                sender_name TEXT,
-                recipient_emails TEXT[],
-                cc_emails TEXT[],
-                bcc_emails TEXT[],
-                date_sent TIMESTAMP WITH TIME ZONE,
-                date_received TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                body_text TEXT,
-                body_html TEXT,
-                normalized_body_text TEXT,
-                normalized_body_html TEXT,
-                snippet TEXT,
-                labels TEXT[],
-                has_attachments BOOLEAN DEFAULT FALSE,
-                attachment_count INTEGER DEFAULT 0,
-                importance_score FLOAT,
-                processed BOOLEAN DEFAULT FALSE,
-                raw_size INTEGER,
-                
-                -- Email headers for threading
-                message_id TEXT,
-                in_reply_to TEXT,
-                "references" TEXT[],
-                
-                -- Deduplication fields
-                content_fingerprint VARCHAR(64),
-                duplicate_group_id INTEGER,
-                normalization_version INTEGER DEFAULT 2,
-                
-                -- Pipeline integration fields
-                pipeline_processed BOOLEAN DEFAULT FALSE,
-                embeddings_created BOOLEAN DEFAULT FALSE,
-                enhanced_embedding_created BOOLEAN DEFAULT FALSE,
-                human_verified BOOLEAN DEFAULT FALSE,
-                
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_gmail_id ON classified_emails(gmail_id);
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_thread ON classified_emails(thread_id);
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_date ON classified_emails(date_sent);
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_sender ON classified_emails(sender_email);
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_processed ON classified_emails(pipeline_processed);
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_fingerprint ON classified_emails(content_fingerprint);
-            CREATE INDEX IF NOT EXISTS idx_classified_emails_duplicate_group ON classified_emails(duplicate_group_id);
-        """)
-        
-        # Email fingerprints v2 table for complete deduplication
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS email_fingerprints_v2 (
-                email_id INTEGER PRIMARY KEY REFERENCES classified_emails(id) ON DELETE CASCADE,
-                new_content_hash VARCHAR(64),
-                quoted_content_hash VARCHAR(64),
-                full_content_hash VARCHAR(64),
-                structure_hash VARCHAR(64),
-                thread_hash VARCHAR(64),
-                recipient_set_hash VARCHAR(64),
-                has_meaningful_new_content BOOLEAN DEFAULT TRUE,
-                new_content_intent VARCHAR(50),
-                email_type VARCHAR(20) DEFAULT 'original',
-                parsing_confidence FLOAT DEFAULT 1.0,
-                is_canonical BOOLEAN DEFAULT TRUE,
-                canonical_email_id INTEGER,
-                fingerprint_version INTEGER DEFAULT 5,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_fingerprints_v2_full_content ON email_fingerprints_v2(full_content_hash);
-            CREATE INDEX IF NOT EXISTS idx_fingerprints_v2_structure ON email_fingerprints_v2(structure_hash);
-            CREATE INDEX IF NOT EXISTS idx_fingerprints_v2_composite ON email_fingerprints_v2(full_content_hash, structure_hash);
-        """)
-        
-        # Email duplicate groups table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS email_duplicate_groups (
-                id SERIAL PRIMARY KEY,
-                content_fingerprint VARCHAR(64),
-                primary_email_id INTEGER REFERENCES classified_emails(id),
-                member_count INTEGER DEFAULT 1,
-                first_seen TIMESTAMP WITH TIME ZONE,
-                last_seen TIMESTAMP WITH TIME ZONE,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW(),
-                normalization_version INTEGER DEFAULT 5
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_duplicate_groups_fingerprint ON email_duplicate_groups(content_fingerprint);
-        """)
-        
-        # Email embeddings table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS email_embeddings (
-                id SERIAL PRIMARY KEY,
-                email_id INTEGER REFERENCES classified_emails(id) ON DELETE CASCADE,
-                embedding VECTOR(384),
-                embedding_text TEXT,
-                created_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(email_id)
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_email_embeddings_vector 
-            ON email_embeddings USING hnsw (embedding vector_cosine_ops);
-        """)
-        
-        self.db_conn.commit()
     
     def _save_email_to_db(self, email_data: Dict) -> Optional[int]:
         """Save email to database with complete deduplication"""
@@ -218,46 +95,49 @@ class GmailServiceAccountExtractor:
                 normalized_body_html = None
             
             # Insert the email with normalized content
+            # Serialize arrays as JSON for SQLite
+            date_sent = email_data.get('date_sent')
+            if hasattr(date_sent, 'isoformat'):
+                date_sent = date_sent.isoformat()
+
             cursor.execute("""
-                INSERT INTO classified_emails (
+                INSERT OR IGNORE INTO classified_emails (
                     gmail_id, thread_id, subject, sender_email, sender_name,
                     recipient_emails, cc_emails, bcc_emails, date_sent, body_text, body_html,
                     normalized_body_text, normalized_body_html,
                     snippet, labels, raw_size, message_id, in_reply_to, "references",
                     has_attachments, attachment_count
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                ) ON CONFLICT (gmail_id) DO NOTHING
-                RETURNING id
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
             """, (
                 email_data['gmail_id'],
                 email_data.get('thread_id'),
                 email_data.get('subject'),
                 email_data.get('sender_email'),
                 email_data.get('sender_name'),
-                email_data.get('recipient_emails', []),
-                email_data.get('cc_emails', []),
-                email_data.get('bcc_emails', []),
-                email_data.get('date_sent'),
+                json.dumps(email_data.get('recipient_emails', [])),
+                json.dumps(email_data.get('cc_emails', [])),
+                json.dumps(email_data.get('bcc_emails', [])),
+                date_sent,
                 email_data.get('body_text'),
                 email_data.get('body_html'),
                 normalized_body_text,
                 normalized_body_html,
                 email_data.get('snippet'),
-                email_data.get('labels', []),
+                json.dumps(email_data.get('labels', [])),
                 email_data.get('raw_size', 0),
                 email_data.get('message_id'),
                 email_data.get('in_reply_to'),
-                email_data.get('references', []),
-                email_data.get('has_attachments', False),
+                json.dumps(email_data.get('references', [])),
+                1 if email_data.get('has_attachments', False) else 0,
                 email_data.get('attachment_count', 0)
             ))
-            
-            result = cursor.fetchone()
-            if not result:
+
+            if cursor.rowcount == 0:
                 return None
-            
-            email_id = result[0]
+
+            email_id = cursor.lastrowid
             
             # Continue with fingerprint processing if we have them
             if fingerprints:
@@ -269,7 +149,7 @@ class GmailServiceAccountExtractor:
                         recipient_set_hash, has_meaningful_new_content,
                         new_content_intent, email_type, parsing_confidence,
                         is_canonical, canonical_email_id, fingerprint_version
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     email_id,
                     fingerprints.new_content_hash,
@@ -297,7 +177,7 @@ class GmailServiceAccountExtractor:
                 cursor.execute("""
                     SELECT edg.id, edg.primary_email_id
                     FROM email_duplicate_groups edg
-                    WHERE edg.content_fingerprint = %s
+                    WHERE edg.content_fingerprint = ?
                 """, (composite_fingerprint,))
                 
                 existing_group = cursor.fetchone()
@@ -309,54 +189,58 @@ class GmailServiceAccountExtractor:
                     # Update email with duplicate group
                     cursor.execute("""
                         UPDATE classified_emails 
-                        SET duplicate_group_id = %s,
-                            content_fingerprint = %s
-                        WHERE id = %s
+                        SET duplicate_group_id = ?,
+                            content_fingerprint = ?
+                        WHERE id = ?
                     """, (duplicate_group_id, composite_fingerprint, email_id))
                     
                     # Update fingerprint record
                     cursor.execute("""
                         UPDATE email_fingerprints_v2
                         SET is_canonical = FALSE,
-                            canonical_email_id = %s
-                        WHERE email_id = %s
+                            canonical_email_id = ?
+                        WHERE email_id = ?
                     """, (canonical_email_id, email_id))
                     
                     # Update group stats
+                    ds = email_data.get('date_sent')
+                    if hasattr(ds, 'isoformat'):
+                        ds = ds.isoformat()
                     cursor.execute("""
-                        UPDATE email_duplicate_groups 
+                        UPDATE email_duplicate_groups
                         SET member_count = member_count + 1,
-                            last_seen = GREATEST(last_seen, %s),
-                            updated_at = NOW()
-                        WHERE id = %s
-                    """, (email_data.get('date_sent'), duplicate_group_id))
+                            last_seen = MAX(last_seen, ?),
+                            updated_at = datetime('now')
+                        WHERE id = ?
+                    """, (ds, duplicate_group_id))
                     
                     print(f"  ↪️ Duplicate detected! Group #{duplicate_group_id} (canonical: #{canonical_email_id})")
                     
                 else:
                     # Email is unique - create new group
+                    ds = email_data.get('date_sent')
+                    if hasattr(ds, 'isoformat'):
+                        ds = ds.isoformat()
                     cursor.execute("""
-                        INSERT INTO email_duplicate_groups 
+                        INSERT INTO email_duplicate_groups
                         (content_fingerprint, primary_email_id, member_count, first_seen, last_seen, normalization_version)
-                        VALUES (%s, %s, 1, %s, %s, 5)
-                        RETURNING id
+                        VALUES (?, ?, 1, ?, ?, 5)
                     """, (
                         composite_fingerprint,
                         email_id,
-                        email_data.get('date_sent'),
-                        email_data.get('date_sent')
+                        ds,
+                        ds
                     ))
-                    
-                    new_group = cursor.fetchone()
-                    if new_group:
-                        duplicate_group_id = new_group[0]
+
+                    duplicate_group_id = cursor.lastrowid
+                    if duplicate_group_id:
                         
                         # Update email with its group
                         cursor.execute("""
                             UPDATE classified_emails 
-                            SET duplicate_group_id = %s,
-                                content_fingerprint = %s
-                            WHERE id = %s
+                            SET duplicate_group_id = ?,
+                                content_fingerprint = ?
+                            WHERE id = ?
                         """, (duplicate_group_id, composite_fingerprint, email_id))
                 
                 # Log email type detection
@@ -430,7 +314,7 @@ class GmailServiceAccountExtractor:
                             cursor.execute("""
                                 SELECT duplicate_group_id 
                                 FROM classified_emails 
-                                WHERE id = %s AND duplicate_group_id IS NOT NULL
+                                WHERE id = ? AND duplicate_group_id IS NOT NULL
                             """, (email_id,))
                             
                             if cursor.fetchone():
@@ -683,7 +567,7 @@ class GmailServiceAccountExtractor:
     #                 thread_message_count,
     #                 has_response
     #             FROM classified_emails
-    #             WHERE id = %s
+    #             WHERE id = ?
     #         """, (email_id,))
     #         
     #         result = cursor.fetchone()
@@ -722,14 +606,14 @@ class GmailServiceAccountExtractor:
     #         cursor = self.db_conn.cursor()
     #         cursor.execute("""
     #             INSERT INTO email_embeddings (email_id, embedding, embedding_text)
-    #             VALUES (%s, %s, %s)
+    #             VALUES (?, ?, ?)
     #             ON CONFLICT (email_id) DO NOTHING
     #         """, (email_id, embedding.tolist(), embedding_text))
     #         
     #         cursor.execute("""
     #             UPDATE classified_emails 
     #             SET embeddings_created = true, updated_at = NOW()
-    #             WHERE id = %s
+    #             WHERE id = ?
     #         """, (email_id,))
     #         
     #     except Exception as e:
@@ -741,7 +625,7 @@ class GmailServiceAccountExtractor:
         cursor.execute("""
             UPDATE classified_emails 
             SET pipeline_processed = true, updated_at = NOW()
-            WHERE id = %s
+            WHERE id = ?
         """, (email_id,))
     
     def _show_pipeline_summary(self):

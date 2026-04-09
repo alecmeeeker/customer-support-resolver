@@ -11,8 +11,8 @@ from local_oauth_service import LocalOAuth2Service
 from datetime import datetime, timezone, timedelta
 import base64
 import json
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import sqlite3
+from config.database import get_connection
 from typing import List, Dict, Optional
 import logging
 from email.utils import parsedate_to_datetime
@@ -32,14 +32,7 @@ class GmailOAuthExtractor:
         self.gmail_service = None
         self.user_email = None
         
-        # Database configuration
-        self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'port': os.getenv('DB_PORT', '5432'),
-            'database': os.getenv('DB_NAME', 'limrose_email_pipeline'),
-            'user': os.getenv('DB_USER', 'postgres'),
-            'password': os.getenv('DB_PASSWORD', '')
-        }
+        pass
         
     async def setup(self):
         """Setup OAuth authentication"""
@@ -60,40 +53,34 @@ class GmailOAuthExtractor:
     
     def get_db_connection(self):
         """Create database connection"""
-        return psycopg2.connect(**self.db_config, cursor_factory=RealDictCursor)
+        return get_connection()
     
     def validate_database_schema(self):
         """Validate that required database tables exist"""
         try:
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    # Check if classified_emails table exists
-                    cursor.execute("""
-                        SELECT EXISTS (
-                            SELECT FROM information_schema.tables
-                            WHERE table_schema = 'public'
-                            AND table_name = 'classified_emails'
-                        );
-                    """)
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='classified_emails'"
+            )
+            table_exists = cursor.fetchone() is not None
+            conn.close()
 
-                    table_exists = cursor.fetchone()[0]
+            if not table_exists:
+                print("Database table 'classified_emails' not found")
+                print("Please create the database schema first:")
+                print("   - Run: ./update_emails_v2.sh --setup")
+                print("   - Or run: python scripts/setup_all_tables.py")
+                return False
 
-                    if not table_exists:
-                        print("❌ Database table 'classified_emails' not found")
-                        print("💡 Please create the database schema first:")
-                        print("   - Run: ./update_emails_v2.sh --setup")
-                        print("   - Or run: python scripts/setup_all_tables.py")
-                        return False
+            print("Database schema validation passed")
+            return True
 
-                    print("✓ Database schema validation passed")
-                    return True
-                    
-        except psycopg2.Error as e:
-            print(f"❌ Database connection failed: {e}")
-            print("💡 Check your database configuration in .env file")
+        except sqlite3.Error as e:
+            print(f"Database connection failed: {e}")
             return False
         except Exception as e:
-            print(f"❌ Database validation error: {e}")
+            print(f"Database validation error: {e}")
             return False
     
     def normalize_email_address(self, email: str) -> str:
@@ -272,75 +259,77 @@ class GmailOAuthExtractor:
 
         saved_count = 0
         saved_gmail_ids = []
-        
+
         try:
-            with self.get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    for email in emails:
-                        try:
-                            # Check if email already exists
-                            cursor.execute(
-                                "SELECT id FROM classified_emails WHERE gmail_id = %s",
-                                (email['gmail_id'],)
-                            )
+            conn = self.get_db_connection()
+            cursor = conn.cursor()
 
-                            if cursor.fetchone():
-                                logger.info(f"Email {email['gmail_id']} already exists, skipping...")
-                                continue
+            for email in emails:
+                try:
+                    # Check if email already exists
+                    cursor.execute(
+                        "SELECT id FROM classified_emails WHERE gmail_id = ?",
+                        (email['gmail_id'],)
+                    )
 
-                            # Parse CC emails into array
-                            cc_emails = []
-                            if email.get('cc'):
-                                # Split by comma and extract email addresses
-                                cc_parts = email['cc'].split(',')
-                                for cc_part in cc_parts:
-                                    cc_email = self.extract_email_address(cc_part.strip())
-                                    if cc_email:
-                                        cc_emails.append(cc_email)
+                    if cursor.fetchone():
+                        logger.info(f"Email {email['gmail_id']} already exists, skipping...")
+                        continue
 
-                            # Insert email into classified_emails table
-                            # Use savepoint so a single failure doesn't roll back the batch
-                            cursor.execute("SAVEPOINT email_save")
-                            cursor.execute("""
-                                INSERT INTO classified_emails (
-                                    gmail_id, thread_id, message_id, in_reply_to,
-                                    subject, sender_name, sender_email,
-                                    recipient_emails, cc_emails,
-                                    date_sent, body_text, labels, processed
-                                ) VALUES (
-                                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                                )
-                                ON CONFLICT (gmail_id) DO NOTHING
-                            """, (
-                                email['gmail_id'],
-                                email['thread_id'],
-                                email['message_id'],
-                                email.get('in_reply_to'),
-                                email['subject'],
-                                email['sender'],  # Full "Name <email>" format
-                                email['sender_email'],  # Just email address
-                                [email['recipient_email']] if email.get('recipient_email') else [],  # Array
-                                cc_emails,  # Array of CC emails
-                                email['received_date'],
-                                email['body'],
-                                email['labels'],
-                                False  # Initially not processed
-                            ))
-                            cursor.execute("RELEASE SAVEPOINT email_save")
+                    # Parse CC emails into list
+                    cc_emails = []
+                    if email.get('cc'):
+                        cc_parts = email['cc'].split(',')
+                        for cc_part in cc_parts:
+                            cc_email = self.extract_email_address(cc_part.strip())
+                            if cc_email:
+                                cc_emails.append(cc_email)
 
-                            saved_count += 1
-                            saved_gmail_ids.append(email['gmail_id'])
+                    # Serialize date for SQLite
+                    date_sent = email['received_date'].isoformat() if email.get('received_date') else None
 
-                        except Exception as e:
-                            logger.error(f"Error saving email {email['gmail_id']}: {e}")
-                            cursor.execute("ROLLBACK TO SAVEPOINT email_save")
-                            continue
+                    # Insert email — use savepoint so a single failure doesn't roll back the batch
+                    cursor.execute("SAVEPOINT email_save")
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO classified_emails (
+                            gmail_id, thread_id, message_id, in_reply_to,
+                            subject, sender_name, sender_email,
+                            recipient_emails, cc_emails,
+                            date_sent, body_text, labels, processed
+                        ) VALUES (
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        )
+                    """, (
+                        email['gmail_id'],
+                        email['thread_id'],
+                        email['message_id'],
+                        email.get('in_reply_to'),
+                        email['subject'],
+                        email['sender'],
+                        email['sender_email'],
+                        json.dumps([email['recipient_email']] if email.get('recipient_email') else []),
+                        json.dumps(cc_emails),
+                        date_sent,
+                        email['body'],
+                        json.dumps(email['labels']),
+                        0
+                    ))
+                    cursor.execute("RELEASE SAVEPOINT email_save")
 
-                    conn.commit()
-                    
+                    saved_count += 1
+                    saved_gmail_ids.append(email['gmail_id'])
+
+                except Exception as e:
+                    logger.error(f"Error saving email {email['gmail_id']}: {e}")
+                    cursor.execute("ROLLBACK TO SAVEPOINT email_save")
+                    continue
+
+            conn.commit()
+            conn.close()
+
         except Exception as e:
             logger.error(f"Database error: {e}")
-        
+
         return saved_count, saved_gmail_ids
     
     def mark_as_processed(self, gmail_ids: List[str]):

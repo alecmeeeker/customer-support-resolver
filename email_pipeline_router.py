@@ -10,7 +10,8 @@ from decimal import Decimal
 import re
 from datetime import datetime, timezone
 from typing import Dict, List, Set, Tuple, Optional
-import psycopg2
+import sqlite3
+from config.database import get_connection
 from sentence_transformers import SentenceTransformer
 from dataclasses import dataclass
 from enum import Enum
@@ -67,88 +68,9 @@ class EmailPipelineRouter:
                 self.model = SentenceTransformer(EMBEDDING_MODEL_NAME, device='cpu', local_files_only=True)
         else:
             self.model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-        self.db_conn = psycopg2.connect(
-            dbname=os.getenv('DB_NAME', 'limrose_email_pipeline'),
-            user=os.getenv('DB_USER', 'postgres'),
-            host=os.getenv('DB_HOST', 'localhost')
-        )
-        self.setup_database()
+        self.db_conn = get_connection()
         self.classification_patterns = self._load_classification_patterns()
         
-    def setup_database(self):
-        """Create email routing tables"""
-        cursor = self.db_conn.cursor()
-        
-        # Multi-classification table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS email_classifications (
-                id SERIAL PRIMARY KEY,
-                email_id INTEGER REFERENCES classified_emails(id),
-                classification_type VARCHAR(50),
-                confidence_score FLOAT,
-                created_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(email_id, classification_type)
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_email_classifications_email ON email_classifications(email_id);
-            CREATE INDEX IF NOT EXISTS idx_email_classifications_type ON email_classifications(classification_type);
-        """)
-        
-        # Pipeline routing table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS email_pipeline_routes (
-                id SERIAL PRIMARY KEY,
-                email_id INTEGER REFERENCES classified_emails(id),
-                pipeline_type VARCHAR(50),
-                priority_score FLOAT,
-                status VARCHAR(20) DEFAULT 'pending',
-                assigned_to VARCHAR(255),
-                processing_notes TEXT,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            );
-            
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_routes_email_type
-                ON email_pipeline_routes(email_id, pipeline_type);
-            CREATE INDEX IF NOT EXISTS idx_pipeline_routes_email ON email_pipeline_routes(email_id);
-            CREATE INDEX IF NOT EXISTS idx_pipeline_routes_type ON email_pipeline_routes(pipeline_type);
-            CREATE INDEX IF NOT EXISTS idx_pipeline_routes_status ON email_pipeline_routes(status);
-        """)
-        
-        # Pipeline outcomes tracking
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pipeline_outcomes (
-                id SERIAL PRIMARY KEY,
-                email_id INTEGER REFERENCES classified_emails(id),
-                pipeline_type VARCHAR(50),
-                outcome_type VARCHAR(50), -- story_published, sale_closed, meeting_scheduled, etc.
-                outcome_details JSONB,
-                revenue_generated DECIMAL(10,2),
-                articles_published INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW()
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_pipeline_outcomes_email ON pipeline_outcomes(email_id);
-            CREATE INDEX IF NOT EXISTS idx_pipeline_outcomes_type ON pipeline_outcomes(outcome_type);
-        """)
-        
-        # Classification performance tracking
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS classification_performance (
-                id SERIAL PRIMARY KEY,
-                classification_type VARCHAR(50),
-                true_positives INTEGER DEFAULT 0,
-                false_positives INTEGER DEFAULT 0,
-                false_negatives INTEGER DEFAULT 0,
-                precision_score FLOAT,
-                recall_score FLOAT,
-                f1_score FLOAT,
-                last_updated TIMESTAMP DEFAULT NOW()
-            );
-        """)
-        
-        self.db_conn.commit()
-    
     def _load_classification_patterns(self) -> Dict:
         """Load classification patterns with confidence scoring"""
         return {
@@ -451,7 +373,7 @@ class EmailPipelineRouter:
         cursor = self.db_conn.cursor()
         
         # Check if email exists first
-        cursor.execute("SELECT id FROM classified_emails WHERE id = %s", (email_id,))
+        cursor.execute("SELECT id FROM classified_emails WHERE id = ?", (email_id,))
         if not cursor.fetchone():
             print(f"Warning: Email ID {email_id} not found in classified_emails table. Skipping routing.")
             return
@@ -461,17 +383,17 @@ class EmailPipelineRouter:
             for classification_type, confidence in classification.confidence_scores.items():
                 cursor.execute("""
                     INSERT INTO email_classifications (email_id, classification_type, confidence_score)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (email_id, classification_type) 
-                    DO UPDATE SET confidence_score = EXCLUDED.confidence_score
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (email_id, classification_type)
+                    DO UPDATE SET confidence_score = excluded.confidence_score
                 """, (email_id, classification_type, confidence))
-            
+
             # Save pipeline routes
             for pipeline_type in classification.pipeline_routes:
                 cursor.execute("""
-                    INSERT INTO email_pipeline_routes (
+                    INSERT OR IGNORE INTO email_pipeline_routes (
                         email_id, pipeline_type, priority_score, status
-                    ) VALUES (%s, %s, %s, %s)
+                    ) VALUES (?, ?, ?, ?)
                 """, (email_id, pipeline_type, classification.priority_score, 'pending'))
             
             self.db_conn.commit()
@@ -485,7 +407,7 @@ class EmailPipelineRouter:
         cursor = self.db_conn.cursor()
         
         cursor.execute("""
-            SELECT 
+            SELECT
                 e.id,
                 e.gmail_id,
                 e.subject,
@@ -495,16 +417,16 @@ class EmailPipelineRouter:
                 pr.priority_score,
                 pr.status,
                 pr.assigned_to,
-                ARRAY_AGG(ec.classification_type) as classifications
+                group_concat(ec.classification_type) as classifications
             FROM email_pipeline_routes pr
             JOIN classified_emails e ON e.id = pr.email_id
             LEFT JOIN email_classifications ec ON e.id = ec.email_id
-            WHERE pr.pipeline_type = %s
-            AND pr.status = %s
-            GROUP BY e.id, e.gmail_id, e.subject, e.sender_name, e.sender_email, 
+            WHERE pr.pipeline_type = ?
+            AND pr.status = ?
+            GROUP BY e.id, e.gmail_id, e.subject, e.sender_name, e.sender_email,
                      e.date_sent, pr.priority_score, pr.status, pr.assigned_to
             ORDER BY pr.priority_score DESC, e.date_sent DESC
-            LIMIT %s
+            LIMIT ?
         """, (pipeline_type, status, limit))
         
         return cursor.fetchall()
@@ -514,9 +436,9 @@ class EmailPipelineRouter:
         cursor = self.db_conn.cursor()
         
         cursor.execute("""
-            UPDATE email_pipeline_routes 
-            SET status = %s, assigned_to = %s, processing_notes = %s, updated_at = NOW()
-            WHERE email_id = %s AND pipeline_type = %s
+            UPDATE email_pipeline_routes
+            SET status = ?, assigned_to = ?, processing_notes = ?, updated_at = datetime('now')
+            WHERE email_id = ? AND pipeline_type = ?
         """, (status, assigned_to, notes, email_id, pipeline_type))
         
         self.db_conn.commit()
@@ -530,8 +452,8 @@ class EmailPipelineRouter:
             INSERT INTO pipeline_outcomes (
                 email_id, pipeline_type, outcome_type, outcome_details,
                 revenue_generated, articles_published
-            ) VALUES (%s, %s, %s, %s, %s, %s)
-        """, (email_id, pipeline_type, outcome_type, 
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (email_id, pipeline_type, outcome_type,
               json.dumps(outcome_details, cls=DateTimeJSONEncoder) if outcome_details else None,
               revenue, articles))
         
