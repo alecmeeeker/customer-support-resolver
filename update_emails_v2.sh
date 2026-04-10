@@ -115,20 +115,26 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
-# Load environment variables from .env file if it exists
+# Load environment variables from .env file
+# Check local directory first, then App Support (written by Limrose.app Settings)
+LIMROSE_APP_SUPPORT_ENV="$HOME/Library/Application Support/Limrose/.env"
 if [ -f ".env" ]; then
     echo "Loading environment variables from .env file..."
     export $(grep -v '^#' .env | xargs)
+elif [ -f "$LIMROSE_APP_SUPPORT_ENV" ]; then
+    echo "Loading environment variables from Limrose.app config..."
+    export $(grep -v '^#' "$LIMROSE_APP_SUPPORT_ENV" | xargs)
 fi
 
 # Check required environment variables
 check_environment() {
     echo -e "${YELLOW}Checking configuration...${NC}"
     
-    # Check for .env file
-    if [ ! -f ".env" ]; then
+    # Check for .env file (local or App Support)
+    if [ ! -f ".env" ] && [ ! -f "$LIMROSE_APP_SUPPORT_ENV" ]; then
         echo -e "${RED}Error: .env file not found${NC}"
-        echo "Run './update_emails_v2.sh --setup' to create initial configuration"
+        echo "Configure your API key in Limrose.app Settings (\u{2318},)"
+        echo "Or run './update_emails_v2.sh --setup' to create initial configuration"
         exit 1
     fi
     

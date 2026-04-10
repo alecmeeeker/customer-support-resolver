@@ -101,6 +101,7 @@ coverage.xml
 ~/.cache/
 .cache/
 models/
+!Limrose/Sources/Models/
 *.bin
 *.pt
 *.pth
@@ -150,3 +151,12 @@ entity_inheritance_final_fix.py
 monitoring/
 tracking/
 analytics/
+
+# Swift / Xcode
+Limrose/.build/
+Limrose/dist/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/

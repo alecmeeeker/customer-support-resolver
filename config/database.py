@@ -2,7 +2,8 @@ import sqlite3
 import lancedb
 import os
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data')
+DATA_DIR = os.environ.get('LIMROSE_DATA_DIR',
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data'))
 
 
 def get_connection():
