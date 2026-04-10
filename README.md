@@ -10,9 +10,11 @@ Customer support teams deal with recurring issues. This system automates the pat
 
 1. **Extract** — Pulls emails from Gmail via OAuth2 with full threading and participant metadata
 2. **Deduplicate** — Fingerprints emails using content normalization (URL/email replacement, alias resolution, forward/reply chain parsing) to eliminate exact and near-duplicates
-3. **Chunk & Embed** — Splits email bodies into 500-character chunks, generates 384-dim vector embeddings with `all-MiniLM-L6-v2`, stores in PostgreSQL via pgvector
+3. **Chunk & Embed** — Splits email bodies into 500-character chunks, generates 384-dim vector embeddings with `all-MiniLM-L6-v2`, stores in LanceDB
 4. **Classify** — Assigns business labels using deterministic rules (financial senders, newswire domains, marketing patterns) with Gemini LLM fallback for ambiguous cases. 18 classification categories, multi-label support
 5. **Resolve** — Matches incoming customer complaints against resolved issues via cosine similarity search, synthesizes fix documentation from the top-k matches using LLM
+
+Results are displayed in **Limrose.app**, a native macOS desktop application that reads directly from the local database and auto-refreshes when new data arrives.
 
 ## Architecture
 
@@ -20,13 +22,13 @@ Customer support teams deal with recurring issues. This system automates the pat
 Gmail (OAuth2)
   |
   v
-gmail_oauth_extractor.py ──> PostgreSQL (classified_emails)
+gmail_oauth_extractor.py ──> SQLite (classified_emails)
   |
   v
 email_deduplication_complete.py ──> Fingerprint + deduplicate
   |
   v
-batch_process_all_emails.py ──> Chunk + embed (pgvector HNSW)
+batch_process_all_emails.py ──> Chunk + embed (LanceDB vectors)
   |
   v
 batch_llm_classifier_optimized.py ──> Classify into pipelines
@@ -35,7 +37,8 @@ batch_llm_classifier_optimized.py ──> Classify into pipelines
 customer_issue_tracker_v2.py ──> Semantic match + resolution synthesis
   |
   v
-customer_issue_dashboard.py ──> Flask dashboard (localhost:5000)
+Limrose.app ──> Native macOS dashboard (reads SQLite directly)
+customer_issue_dashboard.py ──> Flask dashboard (localhost:5000, optional)
 ```
 
 ### Core Modules
@@ -50,8 +53,9 @@ customer_issue_dashboard.py ──> Flask dashboard (localhost:5000)
 | `email_pipeline_router.py` | Multi-label routing with priority scoring |
 | `enhanced_email_embeddings.py` | Context-enriched embeddings incorporating sender history and thread context |
 | `customer_issue_tracker_v2.py` | Semantic similarity search over resolved issues, LLM-powered resolution synthesis |
-| `customer_issue_dashboard.py` | Flask web dashboard for issue statistics and resolution tracking |
+| `customer_issue_dashboard.py` | Flask web dashboard for issue statistics and resolution tracking (optional) |
 | `local_oauth_service.py` | Full OAuth2 authorization code flow with Fernet-encrypted token storage |
+| `Limrose/` | Native macOS SwiftUI desktop app with in-app settings, Keychain-secured API key storage, and live database monitoring |
 
 ## Tech Stack
 
@@ -61,7 +65,9 @@ customer_issue_dashboard.py ──> Flask dashboard (localhost:5000)
 - **sentence-transformers** (`all-MiniLM-L6-v2`, 384 dimensions)
 - **Google Gemini API** for classification and resolution synthesis
 - **Gmail API** via OAuth2 (with legacy service account support)
-- **Flask** for the dashboard
+- **SwiftUI** (macOS 14+) for the native desktop app
+- **GRDB** for Swift-side SQLite access with WAL file watching
+- **Flask** for the optional web dashboard
 - **cryptography** (Fernet) for secure token storage
 
 ## Database
@@ -76,39 +82,87 @@ customer_issue_dashboard.py ──> Flask dashboard (localhost:5000)
 
 **LanceDB** (`data/vectors/`) — 3 tables for vector embeddings: `email_chunk_vectors`, `enhanced_embedding_vectors`, `issue_embedding_vectors`. Cosine similarity search for semantic matching.
 
-## Setup
+## Desktop App (Limrose.app)
+
+The primary interface is a native macOS app that reads directly from the local SQLite database and auto-refreshes when new data arrives.
+
+### Prerequisites
+
+- macOS 14.0 (Sonoma) or later
+- Xcode Command Line Tools (`xcode-select --install`)
+
+### Build & Install
+
+```bash
+git clone https://github.com/alecmeeeker/customer-support-resolver.git
+cd customer-support-resolver
+
+# Build the .app bundle (output: Limrose/dist/Limrose.app)
+cd Limrose
+bash build_app.sh
+
+# Run it
+open dist/Limrose.app
+
+# Or copy it to Applications
+cp -r dist/Limrose.app /Applications/
+```
+
+### Configure (in-app)
+
+All configuration is done inside the app — no need to edit files manually.
+
+1. Open Limrose.app
+2. Go to **Settings** (⌘,)
+3. Select your LLM provider (Gemini or DeepSeek)
+4. Enter your API key ([get a Gemini key here](https://makersuite.google.com/app/apikey))
+5. Click **Save Configuration**
+
+API keys are stored in macOS Keychain. The app writes a `.env` file to `~/Library/Application Support/Limrose/.env` automatically so the Python pipeline can read it.
+
+### Distribute
+
+```bash
+cd Limrose/dist
+zip -r Limrose.zip Limrose.app
+# Share Limrose.zip — recipients just unzip and run
+```
+
+---
+
+## Email Pipeline Setup
+
+The Python pipeline fetches emails, processes them, and writes results to the SQLite database that Limrose.app reads from.
 
 ### Prerequisites
 
 - Python 3.8+
 - Gmail account with Google Cloud project (Gmail API enabled)
-- Gemini API key ([get one here](https://makersuite.google.com/app/apikey))
+- Gemini API key (configured via Limrose.app Settings, or manually in `.env`)
 
 No database installation required — SQLite and LanceDB are embedded and set up automatically.
 
 ### Install
 
 ```bash
-git clone https://github.com/alecmeeeker/customer-support-resolver.git
-cd customer-support-resolver
-
+# From the repository root
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Configure
+### Configure Gmail
 
 ```bash
-# Copy environment template
-cp .env.example .env
-# Edit with your credentials (DB_NAME, LLM_API_KEY, etc.)
-
 # Set up Gmail OAuth (interactive browser flow)
 python setup_oauth.py
+```
 
-# Create database tables
-python scripts/setup_all_tables.py
+If you haven't already configured your LLM API key through Limrose.app Settings, you can do it manually:
+
+```bash
+cp .env.example .env
+# Edit .env with your Gemini API key
 ```
 
 ### Run
@@ -122,8 +176,13 @@ python gmail_oauth_extractor.py          # Extract emails
 python batch_process_all_emails.py       # Chunk + embed
 python batch_llm_classifier_optimized.py --all  # Classify
 python customer_issue_tracker_v2.py      # Resolve issues
+```
 
-# View dashboard
+The pipeline reads its `.env` from the local directory first, then falls back to `~/Library/Application Support/Limrose/.env` (written by the app).
+
+### Optional: Web Dashboard
+
+```bash
 python customer_issue_dashboard.py
 # Open http://localhost:5000
 ```
