@@ -5,10 +5,12 @@ Handles authentication flow for self-hosted deployments
 import os
 import json
 import asyncio
+import ssl
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict
 import aiohttp
+import certifi
 from aiohttp import web
 import webbrowser
 from cryptography.fernet import Fernet
@@ -215,8 +217,9 @@ class LocalOAuth2Service:
             'grant_type': 'authorization_code'
         }
         
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
         async with aiohttp.ClientSession() as session:
-            async with session.post(token_url, data=data) as response:
+            async with session.post(token_url, data=data, ssl=ssl_context) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"Token exchange failed: {error_text}")
