@@ -7,15 +7,18 @@ DATA_DIR = os.environ.get('LIMROSE_DATA_DIR',
 
 
 def get_connection():
-    """Get SQLite connection with WAL mode and foreign key enforcement.
+    """Get SQLite connection with WAL mode, proper timeout, and foreign key enforcement.
 
     Returns a connection with sqlite3.Row factory for dict-like row access.
+    Configured with 30-second busy timeout to handle concurrent access.
     """
     os.makedirs(DATA_DIR, exist_ok=True)
     db_path = os.path.join(DATA_DIR, 'limrose.db')
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 

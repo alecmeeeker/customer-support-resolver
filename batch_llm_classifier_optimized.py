@@ -154,9 +154,9 @@ class OptimizedLLMBatchClassifier:
             print(f"CRITICAL: Could not connect to database. Please run setup_all_tables.py first.", file=sys.stderr)
             raise e
         
-        # Initialize the embedding system once
+        # Initialize the embedding system with shared database connection
         print("🔧 Initializing enhanced embedding system...")
-        self.embedding_system = EnhancedEmailEmbeddings()
+        self.embedding_system = EnhancedEmailEmbeddings(db_conn=self.conn)
         print("✅ Embedding system ready.")
         
         # Initialize HTTP session for connection pooling
@@ -400,12 +400,18 @@ Return JSON only: {{"classifications": ["label1", "label2", ...]}}"""
                     self.timeout_retries = 0
                     return {"classifications": ["api_error"], "reasoning": "Request timeout after 2 retries"}
             
-            # Handle rate limit errors (429)
-            elif hasattr(e, 'response') and e.response and e.response.status_code == 429:
+            # Handle rate limit errors (429) - check both response attribute and error message
+            is_rate_limited = (
+                (hasattr(e, 'response') and e.response is not None and
+                 getattr(e.response, 'status_code', None) == 429) or
+                ('429' in str(e) and 'Too Many Requests' in str(e))
+            )
+
+            if is_rate_limited:
                 print(f"    ⚠️ Rate limit hit. Waiting before retry...", file=sys.stderr)
                 retry_attempts = getattr(self, 'retry_attempts', 0)
                 if retry_attempts < 3:
-                    wait_time = 2 ** retry_attempts  # 1s, 2s, 4s
+                    wait_time = 2 ** (retry_attempts + 1)  # 2s, 4s, 8s (more conservative)
                     print(f"    ⏳ Waiting {wait_time} seconds before retry {retry_attempts + 1}/3...")
                     time.sleep(wait_time)
                     self.retry_attempts = retry_attempts + 1
@@ -414,7 +420,7 @@ Return JSON only: {{"classifications": ["label1", "label2", ...]}}"""
                     self.retry_attempts = 0
                     print(f"    ❌ Max retries exceeded. Marking as api_error.", file=sys.stderr)
                     return {"classifications": ["api_error"], "reasoning": "Rate limit exceeded after 3 retries"}
-            
+
             # Handle all other request errors
             else:
                 print(f"    ❌ LLM API Error: {e}", file=sys.stderr)

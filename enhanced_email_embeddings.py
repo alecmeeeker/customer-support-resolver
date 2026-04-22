@@ -37,7 +37,7 @@ EMBEDDING_MODEL_NAME = 'sentence-transformers/all-MiniLM-L6-v2'
 class EnhancedEmailEmbeddings:
     """Enhanced email embedding system with full context and history"""
 
-    def __init__(self):
+    def __init__(self, db_conn=None):
         logger.info("[INIT] Starting EnhancedEmailEmbeddings initialization...")
         logger.info(f"[INIT] Loading SentenceTransformer model: {EMBEDDING_MODEL_NAME}")
 
@@ -56,7 +56,15 @@ class EnhancedEmailEmbeddings:
         self.service = None
 
         logger.info("[INIT] Connecting to database...")
-        self.db_conn = get_connection()
+        # Use provided connection or create new one
+        if db_conn is not None:
+            self.db_conn = db_conn
+            self._owns_connection = False
+            logger.info("[INIT] Using shared database connection")
+        else:
+            self.db_conn = get_connection()
+            self._owns_connection = True
+            logger.info("[INIT] Created new database connection")
         self.vector_db = get_vector_db()
         logger.info("[INIT] Database connection established")
 

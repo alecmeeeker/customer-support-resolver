@@ -290,9 +290,11 @@ class LocalOAuth2Service:
             
             if token_data['expiry']:
                 expiry_dt = datetime.fromisoformat(token_data['expiry'])
-                # Google's Credentials class expects naive UTC datetime for expiry
-                if expiry_dt.tzinfo is not None:
-                    expiry_dt = expiry_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                # Ensure expiry is timezone-aware UTC for consistent comparisons
+                if expiry_dt.tzinfo is None:
+                    expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+                else:
+                    expiry_dt = expiry_dt.astimezone(timezone.utc)
                 creds.expiry = expiry_dt
             
             return creds
@@ -305,15 +307,23 @@ class LocalOAuth2Service:
         creds = self.load_credentials()
         if not creds:
             raise Exception("No credentials found. Please authenticate first.")
-        
+
+        # Get expiry and ensure it's timezone-aware for comparison
         expiry = creds.expiry
-        if expiry and expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        if creds.expired or (expiry and expiry <= datetime.now(timezone.utc) + timedelta(minutes=buffer_minutes)):
+        if expiry:
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+            needs_refresh = expiry <= now + timedelta(minutes=buffer_minutes)
+        else:
+            needs_refresh = False
+
+        if needs_refresh or (creds.refresh_token and not creds.token):
             logger.info("Token expired or expiring soon, refreshing...")
             creds.refresh(Request())
             self.save_credentials(creds)
-            
+
         return creds
     
     def get_gmail_service(self):
