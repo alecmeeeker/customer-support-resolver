@@ -6,11 +6,29 @@ A web interface to view customer issues with semantic similarity insights
 
 import os
 import sqlite3
+from pathlib import Path
 from config.database import get_connection
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, redirect, url_for, request
 from datetime import datetime, timedelta
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='templates')
+
+# Import and register OAuth blueprint
+from oauth_web_service import oauth_bp, is_oauth_configured, has_valid_token
+app.register_blueprint(oauth_bp)
+
+
+def check_oauth_configured():
+    """Check if OAuth is configured, redirect to setup if not"""
+    # Skip check for setup routes and static files
+    if request.path.startswith('/setup') or request.path.startswith('/auth'):
+        return None
+    if not is_oauth_configured():
+        return redirect('/setup')
+    return None
+
+
+app.before_request(check_oauth_configured)
 
 # HTML template
 DASHBOARD_TEMPLATE = """

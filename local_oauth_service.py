@@ -289,7 +289,11 @@ class LocalOAuth2Service:
             )
             
             if token_data['expiry']:
-                creds.expiry = datetime.fromisoformat(token_data['expiry'])
+                expiry_dt = datetime.fromisoformat(token_data['expiry'])
+                # Google's Credentials class expects naive UTC datetime for expiry
+                if expiry_dt.tzinfo is not None:
+                    expiry_dt = expiry_dt.astimezone(timezone.utc).replace(tzinfo=None)
+                creds.expiry = expiry_dt
             
             return creds
         except Exception as e:
